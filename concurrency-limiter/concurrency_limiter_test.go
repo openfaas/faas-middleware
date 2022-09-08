@@ -11,6 +11,114 @@ import (
 	"time"
 )
 
+func Test_Met_FalseWhenNoLimitSet(t *testing.T) {
+	t.Parallel()
+
+	clMet := false
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Millisecond * 10)
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	limit := 0
+	cl := NewConcurrencyLimiter(http.Handler(handler), limit)
+	if cl.Met() == true {
+		t.Fatalf("Want Met() to be false due to no requests, got: %t", cl.Met())
+	}
+
+	wg := &sync.WaitGroup{}
+	wg.Add(3)
+	go func() {
+		req := httptest.NewRequest("GET", "/", nil)
+		rr := httptest.ResponseRecorder{}
+		cl.ServeHTTP(&rr, req)
+
+		wg.Done()
+	}()
+	go func() {
+		req := httptest.NewRequest("GET", "/", nil)
+		rr := httptest.ResponseRecorder{}
+		cl.ServeHTTP(&rr, req)
+
+		wg.Done()
+	}()
+
+	// Is there a better way to catch the Met() function whilst at least
+	// one of the HTTP calls is in progress?
+	go func() {
+		for i := 0; i < 100; i++ {
+			if cl.Met() == true {
+				clMet = true
+				break
+			}
+			time.Sleep(time.Millisecond * 1)
+		}
+		wg.Done()
+	}()
+
+	wg.Wait()
+
+	want := false
+	if clMet != want {
+		t.Fatalf("Want Met() to be false due to a limit of 0 request and 2 in-flight, got: %t", cl.Met())
+	}
+}
+
+func Test_Met_True_When_OverLimit(t *testing.T) {
+	t.Parallel()
+
+	clMet := false
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Millisecond * 10)
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	limit := 1
+	cl := NewConcurrencyLimiter(http.Handler(handler), limit)
+	if cl.Met() == true {
+		t.Fatalf("Want Met() to be false due to no requests, got: %t", cl.Met())
+	}
+
+	wg := &sync.WaitGroup{}
+	wg.Add(3)
+	go func() {
+		req := httptest.NewRequest("GET", "/", nil)
+		rr := httptest.ResponseRecorder{}
+		cl.ServeHTTP(&rr, req)
+
+		wg.Done()
+	}()
+	go func() {
+		req := httptest.NewRequest("GET", "/", nil)
+		rr := httptest.ResponseRecorder{}
+		cl.ServeHTTP(&rr, req)
+
+		wg.Done()
+	}()
+
+	// Is there a better way to catch the Met() function whilst at least
+	// one of the HTTP calls is in progress?
+	go func() {
+		for i := 0; i < 100; i++ {
+			if cl.Met() == true {
+				clMet = true
+				break
+			}
+			time.Sleep(time.Millisecond * 1)
+		}
+		wg.Done()
+	}()
+
+	wg.Wait()
+
+	want := true
+	if clMet != want {
+		t.Fatalf("Want Met() to be true due to a limit of 1 request and 2 in-flight, got: %t", cl.Met())
+	}
+}
+
 func makeFakeHandler(ctx context.Context, completeInFlightRequestChan chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -114,7 +222,7 @@ func TestConcurrencyLimitOverLimit(t *testing.T) {
 	completeInFlightRequestChan := make(chan struct{}, 3)
 	handler := makeFakeHandler(ctx, completeInFlightRequestChan)
 
-	cl := NewConcurrencyLimiter(http.Handler(handler), 2).(*ConcurrencyLimiter)
+	cl := NewConcurrencyLimiter(http.Handler(handler), 2)
 
 	wg := &sync.WaitGroup{}
 
@@ -156,7 +264,7 @@ func TestConcurrencyLimitOverLimitAndRecover(t *testing.T) {
 	defer cancel()
 	completeInFlightRequestChan := make(chan struct{}, 4)
 	handler := makeFakeHandler(ctx, completeInFlightRequestChan)
-	cl := NewConcurrencyLimiter(http.Handler(handler), 2).(*ConcurrencyLimiter)
+	cl := NewConcurrencyLimiter(http.Handler(handler), 2)
 
 	wg := &sync.WaitGroup{}
 
