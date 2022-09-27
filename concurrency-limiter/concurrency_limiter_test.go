@@ -173,6 +173,7 @@ func TestConcurrencyLimitUnderLimit(t *testing.T) {
 	if rr1.Code != http.StatusOK {
 		t.Fatalf("Want response code %d, got: %d", http.StatusOK, rr1.Code)
 	}
+
 }
 
 func TestConcurrencyLimitAtLimit(t *testing.T) {
@@ -201,6 +202,7 @@ func TestConcurrencyLimitAtLimit(t *testing.T) {
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("Want response code %d, got: %d", http.StatusOK, rr1.Code)
 	}
+
 }
 
 func count(r *httptest.ResponseRecorder, code200s, code429s *int) {
@@ -255,6 +257,23 @@ func TestConcurrencyLimitOverLimit(t *testing.T) {
 	if code200s != 2 || code429s != 1 {
 		t.Fatalf("code 200s: %d, and code429s: %d", code200s, code429s)
 	}
+
+	want := "text/plain"
+	gotContentType := 0
+	if rr1.Header().Get("Content-Type") == want {
+		gotContentType++
+	}
+	if rr2.Header().Get("Content-Type") == want {
+		gotContentType++
+	}
+	if rr3.Header().Get("Content-Type") == want {
+		gotContentType++
+	}
+
+	if gotContentType == 0 {
+		t.Fatalf("Want at least one request with Content-Type %q, got: %q %q %q", want, rr1.Header().Get("Content-Type"), rr2.Header().Get("Content-Type"), rr3.Header().Get("Content-Type"))
+	}
+
 }
 
 func TestConcurrencyLimitOverLimitAndRecover(t *testing.T) {
