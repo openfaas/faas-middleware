@@ -55,6 +55,7 @@ func (cl *ConcurrencyLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	// but we'll check anyway and return early.
 	if cl.maxInflightRequests == 0 {
 		cl.backendHTTPHandler.ServeHTTP(w, r)
+		return
 	}
 
 	requestsStarted := atomic.AddUint64(&cl.requestsStarted, 1)
