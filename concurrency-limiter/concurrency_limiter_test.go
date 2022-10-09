@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+func Test_Met_FalseWhenNil(t *testing.T) {
+	var cl *ConcurrencyLimiter
+	if cl.Met() != false {
+		t.Fatalf("Want Met() to be false when nil, got: %t", cl.Met())
+	}
+}
+
 func Test_Met_FalseWhenNoLimitSet(t *testing.T) {
 	t.Parallel()
 
