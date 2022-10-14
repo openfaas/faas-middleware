@@ -6,6 +6,11 @@ import (
 	"sync/atomic"
 )
 
+// Limiter is an interface that can be used to check if a limit has been met.
+type Limiter interface {
+	Met() bool
+}
+
 type ConcurrencyLimiter struct {
 	backendHTTPHandler http.Handler
 	/*
