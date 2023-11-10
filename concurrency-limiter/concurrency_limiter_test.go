@@ -260,6 +260,7 @@ func TestConcurrencyLimitOverLimit(t *testing.T) {
 
 	want := "text/plain"
 	gotContentType := 0
+	gotInternalHeader := 0
 	if rr1.Header().Get("Content-Type") == want {
 		gotContentType++
 	}
@@ -270,10 +271,23 @@ func TestConcurrencyLimitOverLimit(t *testing.T) {
 		gotContentType++
 	}
 
+	if rr1.Header().Get("X-OpenFaaS-Internal") == "faas-middleware" {
+		gotInternalHeader++
+	}
+	if rr2.Header().Get("X-OpenFaaS-Internal") == "faas-middleware" {
+		gotInternalHeader++
+	}
+	if rr3.Header().Get("X-OpenFaaS-Internal") == "faas-middleware" {
+		gotInternalHeader++
+	}
+
 	if gotContentType == 0 {
 		t.Fatalf("Want at least one request with Content-Type %q, got: %q %q %q", want, rr1.Header().Get("Content-Type"), rr2.Header().Get("Content-Type"), rr3.Header().Get("Content-Type"))
 	}
 
+	if gotInternalHeader == 0 {
+		t.Fatalf("Want at least one request with X-OpenFaaS-Internal header, got: %q %q %q", rr1.Header().Get("X-OpenFaaS-Internal"), rr2.Header().Get("X-OpenFaaS-Internal"), rr3.Header().Get("X-OpenFaaS-Internal"))
+	}
 }
 
 func TestConcurrencyLimitOverLimitAndRecover(t *testing.T) {
