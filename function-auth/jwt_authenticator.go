@@ -122,6 +122,7 @@ func NewJWTAuthMiddleware(next http.Handler) (http.Handler, error) {
 		}
 
 		if !isAuthorized(functionClaims.Authentication, namespace, name) {
+			w.Header().Set("X-OpenFaaS-Internal", "faas-middleware")
 			http.Error(w, "insufficient permissions", http.StatusForbidden)
 
 			log.Printf("%s %s - %d ACCESS DENIED - (%s)", r.Method, r.URL.Path, http.StatusForbidden, time.Since(st).Round(time.Millisecond))
@@ -137,6 +138,7 @@ func NewJWTAuthMiddleware(next http.Handler) (http.Handler, error) {
 // It does not otherwise end the request; the caller should ensure no further writes are done to w.
 // The error message should be plain text.
 func httpUnauthorized(w http.ResponseWriter, err string) {
+	w.Header().Set("X-OpenFaaS-Internal", "faas-middleware")
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer realm=%s", functionRealm))
 	http.Error(w, err, http.StatusUnauthorized)
 }
