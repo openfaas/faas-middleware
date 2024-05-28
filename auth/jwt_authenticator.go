@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"crypto"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,6 +73,8 @@ func (a jwtAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return nil, fmt.Errorf("invalid kid: %v", token.Header["kid"])
 		}
+
+		// HV: Consider caching and refreshing the keyset to handle key rotations.
 		var key *jwk.KeySpec
 		for _, k := range a.keySet.Keys {
 			if k.KeyID == kid {
@@ -85,7 +86,7 @@ func (a jwtAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if key == nil {
 			return nil, fmt.Errorf("invalid kid: %s", kid)
 		}
-		return key.Key.(crypto.PublicKey), nil
+		return key.Key, nil
 	}, parseOptions...)
 	if err != nil {
 		writeUnauthorized(w, fmt.Sprintf("failed to parse JWT token: %s", err))
