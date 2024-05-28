@@ -1,4 +1,4 @@
-package functionauth
+package auth
 
 import (
 	"testing"
