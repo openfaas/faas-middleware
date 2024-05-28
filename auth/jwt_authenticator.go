@@ -51,7 +51,7 @@ func (a jwtAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if bearer == "" {
-		httpUnauthorized(w, "Bearer must be present in Authorization header")
+		writeUnauthorized(w, "Bearer must be present in Authorization header")
 		log.Printf("%s %s - %d ACCESS DENIED - (%s)", r.Method, r.URL.Path, http.StatusUnauthorized, time.Since(st).Round(time.Millisecond))
 		return
 	}
@@ -88,13 +88,13 @@ func (a jwtAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return key.Key.(crypto.PublicKey), nil
 	}, parseOptions...)
 	if err != nil {
-		httpUnauthorized(w, fmt.Sprintf("failed to parse JWT token: %s", err))
+		writeUnauthorized(w, fmt.Sprintf("failed to parse JWT token: %s", err))
 		log.Printf("%s %s - %d ACCESS DENIED - (%s)", r.Method, r.URL.Path, http.StatusUnauthorized, time.Since(st).Round(time.Millisecond))
 		return
 	}
 
 	if !token.Valid {
-		httpUnauthorized(w, fmt.Sprintf("invalid JWT token: %s", bearer))
+		writeUnauthorized(w, fmt.Sprintf("invalid JWT token: %s", bearer))
 
 		log.Printf("%s %s - %d ACCESS DENIED - (%s)", r.Method, r.URL.Path, http.StatusUnauthorized, time.Since(st).Round(time.Millisecond))
 		return
@@ -147,11 +147,11 @@ func NewJWTAuthMiddleware(opts JWTAuthOptions, next http.Handler) (http.Handler,
 	}, nil
 }
 
-// httpUnauthorized replies to the request with the specified error message and 401 HTTP code.
+// writeUnauthorized replies to the request with the specified error message and 401 HTTP code.
 // It sets the WWW-Authenticate header.
 // It does not otherwise end the request; the caller should ensure no further writes are done to w.
 // The error message should be plain text.
-func httpUnauthorized(w http.ResponseWriter, err string) {
+func writeUnauthorized(w http.ResponseWriter, err string) {
 	w.Header().Set("X-OpenFaaS-Internal", "faas-middleware")
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer realm=%s", functionRealm))
 	http.Error(w, err, http.StatusUnauthorized)
