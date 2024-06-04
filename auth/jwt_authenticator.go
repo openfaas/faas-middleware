@@ -40,8 +40,11 @@ func (a jwtAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	issuer := a.issuer
 
 	st := time.Now()
-	for _, key := range a.keySet.Keys {
-		log.Printf("%s: %v", issuer, key.KeyID)
+
+	if a.opts.Debug {
+		for _, key := range a.keySet.Keys {
+			log.Printf("%s: %v", issuer, key.KeyID)
+		}
 	}
 
 	var bearer string
