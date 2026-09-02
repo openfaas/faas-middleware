@@ -162,12 +162,9 @@ func NewJWTAuthMiddleware(ctx context.Context, opts JWTAuthOptions, next http.Ha
 		authority = localAuthorityURL
 	}
 
-	// Bound each request to the authority, whilst retaining cancellation
-	// from the caller's context.
-	fetchCtx, cancel := context.WithTimeout(ctx, authorityTimeout)
-	defer cancel()
-
-	config, err := getConfig(fetchCtx, authority)
+	configCtx, cancel := context.WithTimeout(ctx, authorityTimeout)
+	config, err := getConfig(configCtx, authority)
+	cancel()
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +173,9 @@ func NewJWTAuthMiddleware(ctx context.Context, opts JWTAuthOptions, next http.Ha
 		log.Printf("[JWT Auth] Issuer: %s\tJWKS URI: %s", config.Issuer, config.JWKSURI)
 	}
 
-	keySet, err := getKeyset(fetchCtx, config.JWKSURI)
+	keySetCtx, cancel := context.WithTimeout(ctx, authorityTimeout)
+	keySet, err := getKeyset(keySetCtx, config.JWKSURI)
+	cancel()
 	if err != nil {
 		return nil, err
 	}
