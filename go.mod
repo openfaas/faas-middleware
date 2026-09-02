@@ -1,6 +1,6 @@
 module github.com/openfaas/faas-middleware
 
-go 1.20
+go 1.25.0
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.2.1
@@ -8,6 +8,6 @@ require (
 )
 
 require (
-	golang.org/x/crypto v0.31.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 )
