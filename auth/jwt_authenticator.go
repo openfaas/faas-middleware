@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,7 +23,10 @@ const (
 
 	bearerScheme = "Bearer "
 
-	httpTimeout  = 10 * time.Second
+	// authorityTimeout bounds each request made to the OpenID
+	// configuration and JWKS endpoints.
+	authorityTimeout = 10 * time.Second
+
 	maxBodyBytes = 1 << 20 // 1 MiB
 )
 
@@ -50,6 +54,13 @@ type JWTAuthOptions struct {
 	Namespace      string
 	LocalAuthority bool
 	Debug          bool
+
+	// Authority overrides the OpenID configuration endpoint used to
+	// discover the issuer and JWKS URI. When empty, the in-cluster
+	// gateway is used, or a local gateway for LocalAuthority.
+	// Tokens are still expected to carry the OpenFaaS function claim
+	// shape and must be signed by a key in the authority's JWKS.
+	Authority string
 }
 
 func (a jwtAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -143,13 +154,20 @@ func (a jwtAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // NewJWTAuthMiddleware creates a new middleware handler to handle authentication with OpenFaaS function
 // access tokens.
-func NewJWTAuthMiddleware(opts JWTAuthOptions, next http.Handler) (http.Handler, error) {
+func NewJWTAuthMiddleware(ctx context.Context, opts JWTAuthOptions, next http.Handler) (http.Handler, error) {
 	authority := authorityURL
-	if opts.LocalAuthority {
+	if opts.Authority != "" {
+		authority = opts.Authority
+	} else if opts.LocalAuthority {
 		authority = localAuthorityURL
 	}
 
-	config, err := getConfig(authority)
+	// Bound each request to the authority, whilst retaining cancellation
+	// from the caller's context.
+	fetchCtx, cancel := context.WithTimeout(ctx, authorityTimeout)
+	defer cancel()
+
+	config, err := getConfig(fetchCtx, authority)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +176,7 @@ func NewJWTAuthMiddleware(opts JWTAuthOptions, next http.Handler) (http.Handler,
 		log.Printf("[JWT Auth] Issuer: %s\tJWKS URI: %s", config.Issuer, config.JWKSURI)
 	}
 
-	keySet, err := getKeyset(config.JWKSURI)
+	keySet, err := getKeyset(fetchCtx, config.JWKSURI)
 	if err != nil {
 		return nil, err
 	}
@@ -211,18 +229,16 @@ func writeUnauthorized(w http.ResponseWriter, err string) {
 	http.Error(w, err, http.StatusUnauthorized)
 }
 
-var httpClient = &http.Client{Timeout: httpTimeout}
-
-func getKeyset(uri string) (jwk.KeySpecSet, error) {
+func getKeyset(ctx context.Context, uri string) (jwk.KeySpecSet, error) {
 	var set jwk.KeySpecSet
-	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return set, err
 	}
 
 	req.Header.Add("User-Agent", "openfaas-watchdog")
 
-	res, err := httpClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return set, err
 	}
@@ -245,15 +261,15 @@ func getKeyset(uri string) (jwk.KeySpecSet, error) {
 	return set, nil
 }
 
-func getConfig(jwksURL string) (openIDConfiguration, error) {
+func getConfig(ctx context.Context, jwksURL string) (openIDConfiguration, error) {
 	var config openIDConfiguration
 
-	req, err := http.NewRequest(http.MethodGet, jwksURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
 	if err != nil {
 		return config, err
 	}
 
-	res, err := httpClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return config, err
 	}
