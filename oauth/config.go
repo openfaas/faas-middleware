@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -144,8 +145,8 @@ func ReadConfig(readFile func(string) ([]byte, error)) (Config, error) {
 	if v := os.Getenv("oauth_login_cookie_name"); v != "" {
 		cfg.LoginCookie = v
 	}
-	if cfg.CookieName == cfg.LoginCookie {
-		return Config{}, errors.New("session and login cookie names must differ")
+	if err := cfg.validateCookieNames(); err != nil {
+		return Config{}, err
 	}
 	cfg.LoginRedirect = os.Getenv("oauth_login_redirect")
 	cfg.LogoutRedirect = os.Getenv("oauth_logout_redirect")
@@ -234,4 +235,18 @@ func readSecret(env string, readFile func(string) ([]byte, error)) ([]byte, erro
 		return nil, fmt.Errorf("read %s: %w", env, err)
 	}
 	return data, nil
+}
+
+// validateCookieNames rejects names that http.SetCookie would silently omit.
+func (c Config) validateCookieNames() error {
+	if err := (&http.Cookie{Name: c.CookieName}).Valid(); err != nil {
+		return fmt.Errorf("invalid oauth_cookie_name: %w", err)
+	}
+	if err := (&http.Cookie{Name: c.LoginCookie}).Valid(); err != nil {
+		return fmt.Errorf("invalid oauth_login_cookie_name: %w", err)
+	}
+	if c.CookieName == c.LoginCookie {
+		return errors.New("session and login cookie names must differ")
+	}
+	return nil
 }

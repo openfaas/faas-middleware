@@ -341,3 +341,40 @@ func TestOptionalClientSecret(t *testing.T) {
 		}
 	}
 }
+
+func TestCookieNameValidation(t *testing.T) {
+	for _, env := range []string{"oauth_cookie_name", "oauth_login_cookie_name"} {
+		for _, name := range []string{"bad cookie", "bad;cookie", "bad=cookie", "bad\tcookie", "bad\ncookie", "café", "app_session-v2"} {
+			t.Run(env+"/"+name, func(t *testing.T) {
+				setOAuthEnv(t, map[string]string{
+					"oauth_base_url": "https://example.com", "oauth_client_id": "client",
+					"oauth_issuer_url": "https://issuer.example.com",
+					env:                name,
+				})
+				valid := name == "app_session-v2"
+				_, err := ReadConfig(testReadSecret)
+				if valid && err != nil {
+					t.Fatal(err)
+				}
+				if !valid && (err == nil || !strings.Contains(err.Error(), env)) {
+					t.Fatalf("expected error identifying %s, got %v", env, err)
+				}
+
+				// Callers constructing Config directly must receive the same validation.
+				cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
+				if env == "oauth_cookie_name" {
+					cfg.CookieName = name
+				} else {
+					cfg.LoginCookie = name
+				}
+				_, err = NewOAuthHandler(cfg, nil)
+				if valid && err != nil {
+					t.Fatal(err)
+				}
+				if !valid && (err == nil || !strings.Contains(err.Error(), env)) {
+					t.Fatalf("expected constructor error identifying %s, got %v", env, err)
+				}
+			})
+		}
+	}
+}

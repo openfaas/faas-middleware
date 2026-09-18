@@ -55,8 +55,8 @@ func NewOAuthHandler(cfg Config, client AuthorizationClient) (*OAuthHandler, err
 	if err != nil {
 		return nil, err
 	}
-	if cfg.CookieName == "" || cfg.LoginCookie == "" || cfg.CookieName == cfg.LoginCookie {
-		return nil, errors.New("distinct session and login cookie names are required")
+	if err := cfg.validateCookieNames(); err != nil {
+		return nil, err
 	}
 	h := &OAuthHandler{
 		cookies:           cookies,
