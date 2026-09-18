@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,7 +49,10 @@ func testConfig(authorization, token string) Config {
 
 func testHandler(t *testing.T, cfg Config) http.Handler {
 	t.Helper()
-	client := NewOAuthClient(cfg, nil)
+	client, err := NewOAuthClient(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h, err := NewOAuthHandler(cfg, client)
 	if err != nil {
 		t.Fatal(err)
@@ -122,6 +126,7 @@ func TestCallbackIssuesSessionCookie(t *testing.T) {
 	defer tokenEndpoint.Close()
 
 	cfg := testConfig("https://issuer.example.com/authorize", tokenEndpoint.URL)
+	cfg.AllowHTTP = true
 	handler := testHandler(t, cfg)
 
 	login := httptest.NewRecorder()
@@ -183,6 +188,7 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 	defer tokenEndpoint.Close()
 
 	cfg := testConfig("https://issuer.example.com/authorize", tokenEndpoint.URL)
+	cfg.AllowHTTP = true
 	cfg.LoginRedirect = "https://example.com/function/my-fn/dashboard"
 	handler := testHandler(t, cfg)
 
@@ -278,6 +284,7 @@ func TestCallbackRejectsExpiredIdentity(t *testing.T) {
 	}))
 	defer endpoint.Close()
 	cfg := testConfig("https://issuer.example.com/authorize", endpoint.URL)
+	cfg.AllowHTTP = true
 	handler := testHandler(t, cfg)
 	state, err := testCodec(t, cfg).Encode(cfg.LoginCookie, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
 	if err != nil {
@@ -321,6 +328,7 @@ func TestCallbackOpaqueOAuthToken(t *testing.T) {
 	}))
 	defer endpoint.Close()
 	cfg := testConfig("https://github.com/login/oauth/authorize", endpoint.URL)
+	cfg.AllowHTTP = true
 	cfg.TokenAuthMethod = "client_secret_post"
 	handler := testHandler(t, cfg)
 	login := httptest.NewRecorder()
@@ -641,5 +649,78 @@ func TestCallbackRejectsMissingPKCEVerifier(t *testing.T) {
 	handler.ServeHTTP(res, req)
 	if res.Code != http.StatusBadRequest || client.called {
 		t.Fatal("missing verifier must fail before token exchange")
+	}
+}
+
+func TestOAuthClientEndpointValidation(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		for _, endpoint := range []string{"authorization", "token"} {
+			cfg := testConfig("https://provider.test/authorize", "https://provider.test/token")
+			cfg.AllowHTTP = allow
+			if endpoint == "authorization" {
+				cfg.AuthorizationEndpoint.Scheme = "http"
+			} else {
+				cfg.TokenEndpoint.Scheme = "http"
+			}
+			if _, err := NewOAuthClient(cfg, nil); (err == nil) != allow {
+				t.Fatalf("%s allow_http=%v: %v", endpoint, allow, err)
+			}
+		}
+	}
+}
+
+func TestOAuthTokenHTTPRedirect(t *testing.T) {
+	var requests atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if r.Form.Get("code_verifier") != "verifier" {
+			t.Error("redirect did not preserve verifier")
+		}
+		json.NewEncoder(w).Encode(Token{AccessToken: "token"})
+	}))
+	defer endpoint.Close()
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, endpoint.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	for _, allow := range []bool{false, true} {
+		cfg := testConfig("https://provider.test/authorize", redirect.URL)
+		cfg.AllowHTTP = allow
+		client, err := NewOAuthClient(cfg, redirect.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.Exchange(context.Background(), "code", "verifier")
+		if (err == nil) != allow {
+			t.Fatalf("allow_http=%v: %v", allow, err)
+		}
+		if !allow && requests.Load() != 0 {
+			t.Fatal("sent credentials to HTTP redirect without opt-in")
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatal("opt-in did not permit HTTP redirect")
+	}
+	if redirect.Client().CheckRedirect != nil {
+		t.Fatal("modified caller's HTTP client")
+	}
+}
+
+func TestAllowHTTPKeepsTLSVerification(t *testing.T) {
+	endpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("accepted an untrusted TLS certificate")
+	}))
+	defer endpoint.Close()
+	cfg := testConfig("https://provider.test/authorize", endpoint.URL)
+	cfg.AllowHTTP = true
+	client, err := NewOAuthClient(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Exchange(context.Background(), "code", "verifier"); err == nil {
+		t.Fatal("HTTP opt-in disabled TLS certificate verification")
 	}
 }

@@ -13,6 +13,7 @@ import (
 func setOAuthEnv(t *testing.T, values map[string]string) {
 	t.Helper()
 	keys := []string{
+		"oauth_allow_http",
 		"oauth_base_url",
 		"oauth_session_default_ttl",
 		"oauth_session_ttl",
@@ -376,5 +377,35 @@ func TestCookieNameValidation(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestProviderEndpointSchemes(t *testing.T) {
+	for _, setting := range []string{"", "false", "true"} {
+		for _, env := range []string{"oauth_authorization_endpoint", "oauth_token_endpoint", "oauth_issuer_url"} {
+			for _, endpoint := range []string{"https://provider.test/auth", "http://provider.test/auth", "ftp://provider.test/auth", "http://user:pass@provider.test/auth", "http://provider.test/auth#fragment"} {
+				t.Run(setting+"/"+env+"/"+endpoint, func(t *testing.T) {
+					values := map[string]string{
+						"oauth_base_url": "http://function.test", "oauth_client_id": "client",
+						"oauth_authorization_endpoint": "https://provider.test/authorize",
+						"oauth_token_endpoint":         "https://provider.test/token", "oauth_allow_http": setting,
+					}
+					values[env] = endpoint
+					setOAuthEnv(t, values)
+					cfg, err := ReadConfig(testReadSecret)
+					valid := endpoint == "https://provider.test/auth" || (setting == "true" && endpoint == "http://provider.test/auth")
+					if (err == nil) != valid {
+						t.Fatalf("valid=%v, got error %v", valid, err)
+					}
+					if valid && cfg.AllowHTTP != (setting == "true") {
+						t.Fatal("incorrect HTTP policy")
+					}
+				})
+			}
+		}
+	}
+	t.Setenv("oauth_allow_http", "invalid")
+	if _, err := ReadConfig(testReadSecret); err == nil || !strings.Contains(err.Error(), "oauth_allow_http") {
+		t.Fatalf("expected invalid HTTP option error, got %v", err)
 	}
 }

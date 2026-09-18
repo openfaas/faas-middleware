@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -41,11 +40,11 @@ type OIDCClient struct {
 	keys       *issuerKeys
 }
 
-// NewOIDCClient discovers an HTTPS issuer's endpoints. Discovered metadata must
+// NewOIDCClient discovers the issuer's endpoints. Discovered metadata must
 // identify the configured issuer exactly; explicit OAuth endpoints are replaced.
 // Discovery is bounded by exchangeTimeout and any shorter HTTP client timeout.
 func NewOIDCClient(cfg Config, client *http.Client) (*OIDCClient, error) {
-	issuer, err := parseOIDCURL(cfg.IssuerURL)
+	issuer, err := parseProviderURL(cfg.IssuerURL, cfg.AllowHTTP)
 	if err != nil {
 		return nil, err
 	}
@@ -55,38 +54,22 @@ func NewOIDCClient(cfg Config, client *http.Client) (*OIDCClient, error) {
 	if cfg.ClientID == "" {
 		return nil, errors.New("OIDC requires a client ID")
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
-	// Keep caller-owned clients unchanged and reject redirects to insecure URLs.
-	secureClient := *client
-	secureClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if _, err := parseOIDCURL(req.URL.String()); err != nil {
-			return err
-		}
-		if client.CheckRedirect != nil {
-			return client.CheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("too many OIDC redirects")
-		}
-		return nil
-	}
+	secureClient := providerHTTPClient(client, cfg.AllowHTTP)
 	var metadata openIDConfiguration
 	discovery := strings.TrimRight(cfg.IssuerURL, "/") + "/.well-known/openid-configuration"
-	if err := getOIDCJSON(context.Background(), &secureClient, discovery, &metadata); err != nil {
+	if err := getOIDCJSON(context.Background(), secureClient, discovery, &metadata); err != nil {
 		return nil, fmt.Errorf("OIDC discovery: %w", err)
 	}
 	if metadata.Issuer != cfg.IssuerURL {
 		return nil, errors.New("OIDC discovery issuer does not match configured issuer")
 	}
-	if cfg.AuthorizationEndpoint, err = parseOIDCURL(metadata.AuthorizationEndpoint); err != nil {
+	if cfg.AuthorizationEndpoint, err = parseProviderURL(metadata.AuthorizationEndpoint, cfg.AllowHTTP); err != nil {
 		return nil, fmt.Errorf("OIDC authorization endpoint: %w", err)
 	}
-	if cfg.TokenEndpoint, err = parseOIDCURL(metadata.TokenEndpoint); err != nil {
+	if cfg.TokenEndpoint, err = parseProviderURL(metadata.TokenEndpoint, cfg.AllowHTTP); err != nil {
 		return nil, fmt.Errorf("OIDC token endpoint: %w", err)
 	}
-	if _, err := parseOIDCURL(metadata.JWKSURI); err != nil {
+	if _, err := parseProviderURL(metadata.JWKSURI, cfg.AllowHTTP); err != nil {
 		return nil, fmt.Errorf("OIDC JWKS URI: %w", err)
 	}
 	// Only asymmetric signatures are accepted from the provider's public JWKS.
@@ -102,11 +85,15 @@ func NewOIDCClient(cfg Config, client *http.Client) (*OIDCClient, error) {
 	if !slices.Contains(cfg.Scopes, "openid") {
 		cfg.Scopes = append([]string{"openid"}, cfg.Scopes...)
 	}
+	oauthClient, err := NewOAuthClient(cfg, client)
+	if err != nil {
+		return nil, err
+	}
 	return &OIDCClient{
-		OAuthClient: NewOAuthClient(cfg, &secureClient),
+		OAuthClient: oauthClient,
 		issuer:      cfg.IssuerURL,
 		algorithms:  algorithms,
-		keys:        &issuerKeys{client: &secureClient, uri: metadata.JWKSURI},
+		keys:        &issuerKeys{client: secureClient, uri: metadata.JWKSURI},
 	}, nil
 }
 
@@ -152,14 +139,6 @@ func (c *OIDCClient) VerifyIDToken(ctx context.Context, raw string) (jwt.MapClai
 		}
 	}
 	return claims, nil
-}
-
-func parseOIDCURL(raw string) (*url.URL, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
-		return nil, errors.New("expected an absolute HTTPS URL without userinfo or fragment")
-	}
-	return u, nil
 }
 
 func getOIDCJSON(ctx context.Context, client *http.Client, endpoint string, value any) error {

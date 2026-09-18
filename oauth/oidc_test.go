@@ -31,6 +31,11 @@ type oidcFixture struct {
 
 func newOIDCFixture(t *testing.T, change func(*openIDConfiguration)) *oidcFixture {
 	t.Helper()
+	return newOIDCFixtureWithHTTP(t, change, false)
+}
+
+func newOIDCFixtureWithHTTP(t *testing.T, change func(*openIDConfiguration), allowHTTP bool) *oidcFixture {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +44,7 @@ func newOIDCFixture(t *testing.T, change func(*openIDConfiguration)) *oidcFixtur
 	f.token.Store(map[string]string{"access_token": "opaque"})
 	f.keySet.Store(jwk.KeySpecSet{Keys: []jwk.KeySpec{{Key: &key.PublicKey, KeyID: "first", Use: "sig", Algorithm: "RS256"}}})
 	f.keyStatus.Store(http.StatusOK)
-	f.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/tenant/.well-known/openid-configuration":
 			metadata := openIDConfiguration{Issuer: f.server.URL + "/tenant", AuthorizationEndpoint: f.server.URL + "/authorize", TokenEndpoint: f.server.URL + "/token", JWKSURI: f.server.URL + "/keys", SigningAlgorithms: []string{"RS256"}}
@@ -63,8 +68,14 @@ func newOIDCFixture(t *testing.T, change func(*openIDConfiguration)) *oidcFixtur
 			http.NotFound(w, r)
 		}
 	}))
+	if allowHTTP {
+		f.server.Start()
+	} else {
+		f.server.StartTLS()
+	}
 	t.Cleanup(f.server.Close)
 	f.cfg = testConfig("https://ignored.example/authorize", "https://ignored.example/token")
+	f.cfg.AllowHTTP = allowHTTP
 	f.cfg.IssuerURL = f.server.URL + "/tenant"
 	f.cfg.Scopes = []string{"profile"}
 	return f
@@ -366,5 +377,45 @@ func TestOIDCRejectsHTTPRedirect(t *testing.T) {
 	}
 	if insecureRequests.Load() != 0 {
 		t.Fatal("followed insecure redirect")
+	}
+}
+
+func TestOIDCWithHTTPProvider(t *testing.T) {
+	f := newOIDCFixtureWithHTTP(t, nil, true)
+	f.token.Store(map[string]string{"id_token": signIDToken(t, f.claims(), f.key, "first", jwt.SigningMethodRS256)})
+	client := f.client(t)
+	if _, err := client.Exchange(context.Background(), "code", "verifier"); err != nil {
+		t.Fatal(err)
+	}
+	if f.keyRequests.Load() != 1 {
+		t.Fatal("expected ID token verification using HTTP JWKS endpoint")
+	}
+	f.cfg.AllowHTTP = false
+	if _, err := NewOIDCClient(f.cfg, f.server.Client()); err == nil {
+		t.Fatal("accepted HTTP issuer without development opt-in")
+	}
+}
+
+func TestOIDCDiscoveredHTTPEndpoints(t *testing.T) {
+	for _, field := range []string{"authorization", "token", "jwks"} {
+		t.Run(field, func(t *testing.T) {
+			f := newOIDCFixture(t, func(metadata *openIDConfiguration) {
+				switch field {
+				case "authorization":
+					metadata.AuthorizationEndpoint = "http://provider.test/authorize"
+				case "token":
+					metadata.TokenEndpoint = "http://provider.test/token"
+				case "jwks":
+					metadata.JWKSURI = "http://provider.test/keys"
+				}
+			})
+			if _, err := NewOIDCClient(f.cfg, f.server.Client()); err == nil {
+				t.Fatal("accepted discovered HTTP endpoint without opt-in")
+			}
+			f.cfg.AllowHTTP = true
+			if _, err := NewOIDCClient(f.cfg, f.server.Client()); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

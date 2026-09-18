@@ -32,7 +32,7 @@ func NewClient(cfg Config, client *http.Client) (AuthorizationClient, error) {
 	if cfg.IssuerURL != "" {
 		return NewOIDCClient(cfg, client)
 	}
-	return NewOAuthClient(cfg, client), nil
+	return NewOAuthClient(cfg, client)
 }
 
 // OAuthClient performs the OAuth authorization-code flow against the
@@ -50,10 +50,19 @@ type OAuthClient struct {
 }
 
 // NewOAuthClient builds a client from the configuration. When httpClient is
-// nil, http.DefaultClient is used.
-func NewOAuthClient(cfg Config, httpClient *http.Client) *OAuthClient {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
+// nil, http.DefaultClient is used. Provider endpoints must use HTTPS unless
+// AllowHTTP is enabled for development.
+func NewOAuthClient(cfg Config, httpClient *http.Client) (*OAuthClient, error) {
+	for name, endpoint := range map[string]*url.URL{
+		"authorization endpoint": cfg.AuthorizationEndpoint,
+		"token endpoint":         cfg.TokenEndpoint,
+	} {
+		if endpoint == nil {
+			return nil, fmt.Errorf("OAuth %s is required", name)
+		}
+		if _, err := parseProviderURL(endpoint.String(), cfg.AllowHTTP); err != nil {
+			return nil, fmt.Errorf("OAuth %s: %w", name, err)
+		}
 	}
 	return &OAuthClient{
 		authorizationEndpoint: cfg.AuthorizationEndpoint,
@@ -63,8 +72,8 @@ func NewOAuthClient(cfg Config, httpClient *http.Client) *OAuthClient {
 		tokenAuthMethod:       cfg.TokenAuthMethod,
 		redirectURL:           cfg.redirectURL(),
 		scopes:                cfg.Scopes,
-		httpClient:            httpClient,
-	}
+		httpClient:            providerHTTPClient(httpClient, cfg.AllowHTTP),
+	}, nil
 }
 
 // AuthorizationURL builds the authorization request URL from a copy of the
@@ -148,4 +157,26 @@ func (c *OAuthClient) Exchange(ctx context.Context, code, verifier string) (Toke
 	}
 
 	return resp.Token, nil
+}
+
+// providerHTTPClient applies the endpoint policy to redirects without changing
+// the caller's client or its TLS certificate verification settings.
+func providerHTTPClient(client *http.Client, allowHTTP bool) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	providerClient := *client
+	providerClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if _, err := parseProviderURL(req.URL.String(), allowHTTP); err != nil {
+			return err
+		}
+		if client.CheckRedirect != nil {
+			return client.CheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("too many provider redirects")
+		}
+		return nil
+	}
+	return &providerClient
 }

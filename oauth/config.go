@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +29,9 @@ const (
 
 // Config configures the auth handlers.
 type Config struct {
+	// AllowHTTP permits HTTP provider endpoints for development. HTTPS is required by default.
+	AllowHTTP bool
+
 	// SessionDefaultTTL applies when an OAuth response supplies no expiry.
 	SessionDefaultTTL time.Duration
 	// SessionTTL is an explicit local-session lifetime override, not a cap.
@@ -94,6 +98,14 @@ func ReadConfig(readFile func(string) ([]byte, error)) (Config, error) {
 		SessionDefaultTTL: time.Hour,
 		CookieName:        defaultSessionName,
 		LoginCookie:       defaultLoginName,
+	}
+
+	if raw := os.Getenv("oauth_allow_http"); raw != "" {
+		allow, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid oauth_allow_http: %w", err)
+		}
+		cfg.AllowHTTP = allow
 	}
 
 	for name, target := range map[string]*time.Duration{
@@ -178,7 +190,7 @@ func ReadConfig(readFile func(string) ([]byte, error)) (Config, error) {
 		return Config{}, errors.New("auth requires base_url and client_id")
 	}
 	if cfg.IssuerURL != "" {
-		issuer, err := parseOIDCURL(cfg.IssuerURL)
+		issuer, err := parseProviderURL(cfg.IssuerURL, cfg.AllowHTTP)
 		if err != nil {
 			return Config{}, fmt.Errorf("invalid oauth_issuer_url: %w", err)
 		}
@@ -194,8 +206,8 @@ func ReadConfig(readFile func(string) ([]byte, error)) (Config, error) {
 		"authorization endpoint": cfg.AuthorizationEndpoint,
 		"token endpoint":         cfg.TokenEndpoint,
 	} {
-		if u.Scheme != "https" && u.Scheme != "http" {
-			return Config{}, fmt.Errorf("auth %s must be a valid http(s) URL", name)
+		if _, err := parseProviderURL(u.String(), cfg.AllowHTTP); err != nil {
+			return Config{}, fmt.Errorf("auth %s: %w", name, err)
 		}
 	}
 
@@ -249,4 +261,15 @@ func (c Config) validateCookieNames() error {
 		return errors.New("session and login cookie names must differ")
 	}
 	return nil
+}
+
+func parseProviderURL(raw string, allowHTTP bool) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return nil, errors.New("expected an absolute provider URL without userinfo or fragment")
+	}
+	if u.Scheme != "https" && !(allowHTTP && u.Scheme == "http") {
+		return nil, errors.New("provider URL must use HTTPS unless oauth_allow_http is enabled for development")
+	}
+	return u, nil
 }
