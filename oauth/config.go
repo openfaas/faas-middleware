@@ -29,7 +29,10 @@ const (
 type Config struct {
 	// SessionDefaultTTL applies when an OAuth response supplies no expiry.
 	SessionDefaultTTL time.Duration
-	// SessionTTL replaces the provider lifetime when nonzero.
+	// SessionTTL is an explicit local-session lifetime override, not a cap.
+	// Zero preserves provider expiry (or SessionDefaultTTL when absent).
+	// Nonzero permits function access beyond provider token expiry without
+	// refreshing or revalidating that token; its provider-side expiry is unchanged.
 	SessionTTL time.Duration
 
 	// BaseURL is the public base URL of the function, e.g.

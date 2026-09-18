@@ -106,6 +106,8 @@ func (h *OAuthHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	verifier := make([]byte, 32)
+	// In Go 1.26, rand.Read fills the buffer or terminates the process.
+	// It never returns an error or continues with an unfilled verifier.
 	rand.Read(verifier)
 	session := loginSession{
 		State:    rand.Text(),

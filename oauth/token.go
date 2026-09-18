@@ -42,6 +42,12 @@ func (h *OAuthHandler) sessionExpiry(token Token, now time.Time) (time.Time, err
 		expires = now.Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 	if h.sessionTTL > 0 {
+		// Explicit operator opt-in: keep users signed in to this function even
+		// when the provider issues short-lived tokens. After login, the signed
+		// wrapper's expiry governs function access; the embedded token is not
+		// refreshed or revalidated on each request and may expire independently.
+		// This is deliberately an override, not min(provider expiry, TTL).
+		// Without the override, the provider expiry selected above is retained.
 		expires = now.Add(h.sessionTTL)
 	}
 	expires = expires.Truncate(time.Second)
