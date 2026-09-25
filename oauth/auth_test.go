@@ -64,7 +64,7 @@ func TestLoginRedirectsToAuthorizationEndpointWithStateCookie(t *testing.T) {
 	handler := testHandler(t, testConfig("https://issuer.example.com/authorize", "https://issuer.example.com/token"))
 
 	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
 
 	if res.Code != http.StatusFound {
 		t.Fatalf("login returned %d, want 302", res.Code)
@@ -94,12 +94,36 @@ func TestLoginRedirectsToAuthorizationEndpointWithStateCookie(t *testing.T) {
 	}
 }
 
-func TestLoginRejectsNonGet(t *testing.T) {
+func TestLoginRejectsUnsupportedMethod(t *testing.T) {
 	handler := testHandler(t, testConfig("https://issuer.example.com/authorize", "https://issuer.example.com/token"))
 	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/auth/login", nil))
 	if res.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("login POST returned %d, want 405", res.Code)
+		t.Fatalf("login PUT returned %d, want 405", res.Code)
+	}
+}
+
+func TestLoginPageServesHTML(t *testing.T) {
+	handler := testHandler(t, testConfig("https://issuer.example.com/authorize", "https://issuer.example.com/token"))
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("login page returned %d, want 200", res.Code)
+	}
+	if ct := res.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("expected HTML, got %q", ct)
+	}
+	if res.Header().Get("Location") != "" {
+		t.Fatal("serving the login page must not redirect to the provider")
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "Sign in") {
+		t.Fatal("login page missing its button")
+	}
+	// The button POSTs back to the same route to start the flow; the page
+	// itself never auto-starts it.
+	if !strings.Contains(body, `<form method="post" action="https://example.com/function/my-fn/auth/login">`) {
+		t.Fatalf("login page does not POST to the login route: %s", body)
 	}
 }
 
@@ -130,7 +154,7 @@ func TestCallbackIssuesSessionCookie(t *testing.T) {
 	handler := testHandler(t, cfg)
 
 	login := httptest.NewRecorder()
-	handler.ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	handler.ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
 	loginCookie := login.Result().Cookies()[0]
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+loginState(t, login), nil)
@@ -193,7 +217,7 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 	handler := testHandler(t, cfg)
 
 	login := httptest.NewRecorder()
-	handler.ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	handler.ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
 	loginCookie := login.Result().Cookies()[0]
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+loginState(t, login), nil)
@@ -332,7 +356,7 @@ func TestCallbackOpaqueOAuthToken(t *testing.T) {
 	cfg.TokenAuthMethod = "client_secret_post"
 	handler := testHandler(t, cfg)
 	login := httptest.NewRecorder()
-	handler.ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	handler.ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+loginState(t, login), nil)
 	req.AddCookie(login.Result().Cookies()[0])
 	res := httptest.NewRecorder()
@@ -424,21 +448,21 @@ func TestCookiePath(t *testing.T) {
 	}
 }
 
-type errorRedirectClient struct {
+type stubClient struct {
 	token  Token
 	err    error
 	called bool
 }
 
-func (c *errorRedirectClient) AuthorizationURL(string, string) string {
+func (c *stubClient) AuthorizationURL(string, string) string {
 	return "https://issuer.example/authorize"
 }
-func (c *errorRedirectClient) Exchange(context.Context, string, string) (Token, error) {
+func (c *stubClient) Exchange(context.Context, string, string) (Token, error) {
 	c.called = true
 	return c.token, c.err
 }
 
-func TestCallbackErrorRedirect(t *testing.T) {
+func TestCallbackErrorPage(t *testing.T) {
 	for _, tc := range []struct {
 		name, query  string
 		token        Token
@@ -453,65 +477,72 @@ func TestCallbackErrorRedirect(t *testing.T) {
 		{name: "expired identity", token: Token{IDToken: fakeJWT(map[string]any{"sub": "user", "exp": time.Now().Add(-time.Hour).Unix()})}, status: 401},
 		{name: "oversized session", token: Token{AccessToken: strings.Repeat("x", maxCookieValueBytes)}, status: 500},
 	} {
-		for _, redirect := range []string{"", "https://example.com/function/my-fn/login-error"} {
-			t.Run(tc.name+"/"+redirect, func(t *testing.T) {
-				cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
-				cfg.ErrorRedirect = redirect
-				client := &errorRedirectClient{token: tc.token, err: tc.err}
-				h, err := NewOAuthHandler(cfg, client)
-				if err != nil {
-					t.Fatal(err)
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
+			client := &stubClient{token: tc.token, err: tc.err}
+			h, err := NewOAuthHandler(cfg, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := testCodec(t, cfg).Encode(cfg.LoginCookie, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := tc.query
+			if query == "" {
+				query = "code=code&state=state"
+			}
+			req := httptest.NewRequest(http.MethodGet, "/auth/callback?"+query, nil)
+			req.AddCookie(&http.Cookie{Name: cfg.LoginCookie, Value: state})
+			res := httptest.NewRecorder()
+			h.ServeHTTP(res, req)
+			if res.Code != tc.status {
+				t.Fatalf("status %d, want %d", res.Code, tc.status)
+			}
+			if res.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("error page must not be cached")
+			}
+			if res.Header().Get("Location") != "" {
+				t.Fatal("login failure must render a built-in page, not redirect")
+			}
+			if ct := res.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+				t.Fatalf("expected an HTML error page, got %q", ct)
+			}
+			if !strings.Contains(res.Body.String(), "Sign in failed") || !strings.Contains(res.Body.String(), cfg.BaseURL.JoinPath("/auth/login").String()) {
+				t.Fatal("error page missing sign-in link")
+			}
+			if strings.Contains(res.Body.String(), "sensitive provider details") {
+				t.Fatal("provider details exposed")
+			}
+			if client.called == tc.skipExchange {
+				t.Fatal("unexpected token exchange")
+			}
+			for _, cookie := range res.Result().Cookies() {
+				if cookie.Name == cfg.CookieName && cookie.MaxAge >= 0 {
+					t.Fatal("issued session on failure")
 				}
-				state, err := testCodec(t, cfg).Encode(cfg.LoginCookie, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-				query := tc.query
-				if query == "" {
-					query = "code=code&state=state"
-				}
-				req := httptest.NewRequest(http.MethodGet, "/auth/callback?"+query, nil)
-				req.AddCookie(&http.Cookie{Name: cfg.LoginCookie, Value: state})
-				res := httptest.NewRecorder()
-				h.ServeHTTP(res, req)
-				if redirect != "" {
-					if res.Code != http.StatusSeeOther || res.Header().Get("Location") != redirect {
-						t.Fatalf("unexpected redirect: %d %q", res.Code, res.Header().Get("Location"))
-					}
-					if res.Header().Get("Cache-Control") != "no-store" {
-						t.Fatal("error redirect must not be cached")
-					}
-				} else if res.Code != tc.status || res.Header().Get("Location") != "" {
-					t.Fatalf("unexpected fallback response: %d", res.Code)
-				}
-				if strings.Contains(res.Body.String(), "sensitive provider details") {
-					t.Fatal("provider details exposed")
-				}
-				if client.called == tc.skipExchange {
-					t.Fatal("unexpected token exchange")
-				}
-				for _, cookie := range res.Result().Cookies() {
-					if cookie.Name == cfg.CookieName && cookie.MaxAge >= 0 {
-						t.Fatal("issued session on failure")
-					}
-				}
-			})
-		}
+			}
+		})
 	}
 }
 
-func TestLoginCreationErrorRedirect(t *testing.T) {
+func TestLoginCreationErrorPage(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
-	cfg.ErrorRedirect = "https://example.com/function/my-fn/login-error"
 	cfg.LoginCookie = strings.Repeat("x", maxCookieValueBytes)
-	h, err := NewOAuthHandler(cfg, &errorRedirectClient{})
+	h, err := NewOAuthHandler(cfg, &stubClient{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	res := httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
-	if res.Code != 303 || res.Header().Get("Location") != cfg.ErrorRedirect {
-		t.Fatal("login creation failure did not redirect")
+	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("login creation failure returned %d", res.Code)
+	}
+	if res.Header().Get("Location") != "" {
+		t.Fatal("login creation failure must render a built-in page, not redirect")
+	}
+	if ct := res.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("expected an HTML error page, got %q", ct)
 	}
 }
 
@@ -584,7 +615,7 @@ func TestPKCELoginAndExchange(t *testing.T) {
 						t.Fatal(err)
 					}
 					login := httptest.NewRecorder()
-					handler.ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+					handler.ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
 					location, err := url.Parse(login.Header().Get("Location"))
 					if err != nil {
 						t.Fatal(err)
@@ -594,7 +625,7 @@ func TestPKCELoginAndExchange(t *testing.T) {
 						t.Fatal("authorization request must send only the S256 challenge")
 					}
 					second := httptest.NewRecorder()
-					handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+					handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
 					secondURL, err := url.Parse(second.Header().Get("Location"))
 					if err != nil {
 						t.Fatal(err)
@@ -634,7 +665,7 @@ func TestPKCELoginAndExchange(t *testing.T) {
 
 func TestCallbackRejectsMissingPKCEVerifier(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
-	client := &errorRedirectClient{}
+	client := &stubClient{}
 	handler, err := NewOAuthHandler(cfg, client)
 	if err != nil {
 		t.Fatal(err)
