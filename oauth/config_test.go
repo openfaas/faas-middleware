@@ -28,8 +28,6 @@ func setOAuthEnv(t *testing.T, values map[string]string) {
 		"oauth_signing_key",
 		"oauth_login_cookie_name",
 		"oauth_login_redirect",
-		"oauth_logout_redirect",
-		"oauth_error_redirect",
 	}
 	for _, k := range keys {
 		value := values[k]
@@ -79,7 +77,6 @@ func TestReadConfigOverrides(t *testing.T) {
 		"oauth_cookie_name":            "app_session",
 		"oauth_login_cookie_name":      "app_login",
 		"oauth_login_redirect":         "https://gateway.example.com/function/my-fn/dashboard",
-		"oauth_error_redirect":         "https://gateway.example.com/function/my-fn/login-error",
 	})
 	cfg, err := ReadConfig(testReadSecret)
 	if err != nil {
@@ -90,9 +87,6 @@ func TestReadConfigOverrides(t *testing.T) {
 	}
 	if cfg.CookieName != "app_session" || cfg.LoginCookie != "app_login" {
 		t.Fatalf("unexpected cookie names: %s / %s", cfg.CookieName, cfg.LoginCookie)
-	}
-	if cfg.ErrorRedirect != "https://gateway.example.com/function/my-fn/login-error" {
-		t.Fatal("error redirect not configured")
 	}
 	if cfg.LoginRedirect != "https://gateway.example.com/function/my-fn/dashboard" {
 		t.Fatalf("unexpected login redirect: %s", cfg.LoginRedirect)

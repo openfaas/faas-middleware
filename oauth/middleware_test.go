@@ -111,8 +111,11 @@ func TestOAuthMiddlewareRejectsInvalidSessions(t *testing.T) {
 			req.Header["Cookie"] = headers
 			res := httptest.NewRecorder()
 			handler.ServeHTTP(res, req)
-			if res.Code != http.StatusUnauthorized {
-				t.Fatalf("status %d, expected 401", res.Code)
+			if res.Code != http.StatusSeeOther {
+				t.Fatalf("status %d, expected 303", res.Code)
+			}
+			if location := res.Header().Get("Location"); location != loginURL(cfg) {
+				t.Fatalf("redirect to %q, expected login page %q", location, loginURL(cfg))
 			}
 			if res.Header().Get("Cache-Control") != "no-store" {
 				t.Fatal("rejection must not be cached")
@@ -121,7 +124,7 @@ func TestOAuthMiddlewareRejectsInvalidSessions(t *testing.T) {
 	}
 }
 
-func TestOAuthMiddlewareAllowsAnonymousRequests(t *testing.T) {
+func TestOAuthMiddlewareRedirectsAnonymousRequests(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 	for _, header := range []string{"", "theme=dark"} {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -129,19 +132,163 @@ func TestOAuthMiddlewareAllowsAnonymousRequests(t *testing.T) {
 			req.Header.Set("Cookie", header)
 		}
 		handler, err := NewOAuthMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r != req {
-				t.Error("anonymous request should pass through unchanged")
-			}
-			w.WriteHeader(http.StatusOK)
+			t.Error("anonymous request must not reach upstream")
 		}))
 		if err != nil {
 			t.Fatal(err)
 		}
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
-		if res.Code != http.StatusOK {
-			t.Fatalf("anonymous request returned %d", res.Code)
+		if res.Code != http.StatusSeeOther {
+			t.Fatalf("anonymous request returned %d, expected 303", res.Code)
 		}
+		if location := res.Header().Get("Location"); location != loginURL(cfg) {
+			t.Fatalf("redirect to %q, expected login page %q", location, loginURL(cfg))
+		}
+		if res.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("redirect must not be cached")
+		}
+	}
+}
+
+func loginURL(cfg Config) string {
+	return cfg.BaseURL.JoinPath("/auth/login").String()
+}
+
+func TestOAuthMiddlewareDuplicateCookieScopes(t *testing.T) {
+	for _, tc := range []struct {
+		base  string
+		paths []string
+	}{
+		{"https://example.com", []string{"/"}},
+		{"https://example.com/", []string{"/"}},
+		{"http://example.com/function/my-fn/", []string{"/", "/function/my-fn"}},
+		{"https://example.com/function/my%20fn/", []string{"/", "/function/my%20fn"}},
+	} {
+		t.Run(tc.base, func(t *testing.T) {
+			cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
+			cfg.BaseURL, _ = url.Parse(tc.base)
+			cfg.CookieName = "custom_session"
+			handler, err := NewOAuthMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("duplicate cookies reached the application")
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodGet, tc.base, nil)
+			req.Header.Set("Cookie", "custom_session=one; custom_session=two")
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			var paths []string
+			for _, cookie := range res.Result().Cookies() {
+				paths = append(paths, cookie.Path)
+				if cookie.Name != cfg.CookieName || cookie.Value != "" || cookie.MaxAge != -1 ||
+					cookie.Domain != "" || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode ||
+					cookie.Secure != (cfg.BaseURL.Scheme == "https") {
+					t.Fatalf("unexpected expired cookie: %+v", cookie)
+				}
+			}
+			if !reflect.DeepEqual(paths, tc.paths) {
+				t.Fatalf("expired cookie paths %v, want %v", paths, tc.paths)
+			}
+		})
+	}
+}
+
+func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
+	for _, suffix := range []string{"", "/"} {
+		t.Run("base URL suffix="+suffix, func(t *testing.T) {
+			cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
+			cfg.BaseURL.Path += suffix
+			prefix := strings.TrimRight(cfg.BaseURL.Path, "/")
+			client := &stubClient{token: Token{AccessToken: "new-session"}}
+			authHandler, err := NewOAuthHandler(cfg, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			protected, err := NewOAuthMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mux := http.NewServeMux()
+			mux.Handle("/auth/", authHandler)
+			mux.Handle("/", protected)
+			handler := http.StripPrefix(prefix, mux)
+			jar, _ := cookiejar.New(nil)
+			signed, err := testCodec(t, cfg).Encode(cfg.CookieName, Token{AccessToken: "old-session"}, time.Now().Add(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			jar.SetCookies(cfg.BaseURL, []*http.Cookie{
+				{Name: cfg.CookieName, Value: "legacy-session", Path: "/", Secure: true},
+				{Name: cfg.CookieName, Value: signed, Path: prefix, Secure: true},
+				{Name: cfg.CookieName, Value: "other-function", Path: "/function/other", Secure: true},
+				{Name: "theme", Value: "dark", Path: "/"},
+			})
+			request := func(method, target string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(method, target, nil)
+				for _, cookie := range jar.Cookies(req.URL) {
+					req.AddCookie(cookie)
+				}
+				res := httptest.NewRecorder()
+				handler.ServeHTTP(res, req)
+				jar.SetCookies(req.URL, res.Result().Cookies())
+				return res
+			}
+
+			initial := request(http.MethodGet, cfg.BaseURL.JoinPath("private").String())
+			if initial.Code != http.StatusSeeOther || initial.Header().Get("Location") != loginURL(cfg) || calls != 0 {
+				t.Fatal("duplicate cookies must redirect to login without reaching the application")
+			}
+			if page := request(http.MethodGet, initial.Header().Get("Location")); page.Code != http.StatusOK {
+				t.Fatalf("login page returned %d", page.Code)
+			}
+			login := request(http.MethodPost, loginURL(cfg))
+			if login.Code != http.StatusFound {
+				t.Fatalf("login returned %d", login.Code)
+			}
+			var state loginSession
+			if err := testCodec(t, cfg).Decode(cfg.LoginCookie, login.Result().Cookies()[0].Value, &state); err != nil {
+				t.Fatal(err)
+			}
+			callbackURL := cfg.BaseURL.JoinPath("auth/callback")
+			callbackURL.RawQuery = url.Values{"code": {"code"}, "state": {state.State}}.Encode()
+			callback := request(http.MethodGet, callbackURL.String())
+			if callback.Code != http.StatusSeeOther || callback.Header().Get("Location") != cfg.BaseURL.String() || !client.called {
+				t.Fatalf("callback did not complete sign-in: status %d", callback.Code)
+			}
+			if res := request(http.MethodGet, cfg.BaseURL.JoinPath("private").String()); res.Code != http.StatusNoContent || calls != 1 {
+				t.Fatalf("successful sign-in left the browser in a login loop: status %d, application calls %d", res.Code, calls)
+			}
+			cookies := jar.Cookies(cfg.BaseURL)
+			if len(cookies) != 2 {
+				t.Fatalf("expected one session cookie and the theme cookie, got %d cookies", len(cookies))
+			}
+			for _, cookie := range cookies {
+				switch cookie.Name {
+				case cfg.CookieName:
+					var token Token
+					if err := testCodec(t, cfg).Decode(cfg.CookieName, cookie.Value, &token); err != nil || token.AccessToken != "new-session" {
+						t.Fatal("browser did not retain the new session")
+					}
+				case "theme":
+					if cookie.Value != "dark" {
+						t.Fatal("unrelated cookie changed")
+					}
+				}
+			}
+			otherURL, _ := url.Parse("https://example.com/function/other")
+			for _, cookie := range jar.Cookies(otherURL) {
+				if cookie.Name == cfg.CookieName && cookie.Value == "other-function" {
+					return
+				}
+			}
+			t.Fatal("another function's session cookie was removed")
+		})
 	}
 }
 
@@ -185,7 +332,7 @@ func TestOIDCSessionThroughHTTPProxy(t *testing.T) {
 	browser := server.Client()
 	browser.Jar, _ = cookiejar.New(nil)
 	browser.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	login, err := browser.Get(server.URL + prefix + "/auth/login")
+	login, err := browser.Post(server.URL+prefix+"/auth/login", "text/plain", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
