@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -175,22 +176,18 @@ func TestCallbackIssuesSessionCookie(t *testing.T) {
 			if !c.HttpOnly {
 				t.Fatal("session cookie must be HttpOnly")
 			}
-			var token Token
-			if err := testCodec(t, cfg).Decode(cfg.CookieName, c.Value, &token); err != nil {
-				t.Fatal(err)
-			}
 			if len(strings.Split(c.Value, ".")) != 3 {
 				t.Fatal("browser cookie must use the signed JWT wrapper")
 			}
-			if token.AccessToken != issuedJWT {
-				t.Fatalf("session cookie must carry the access token verbatim")
-			}
-			claims, err := parseJWT(token.AccessToken)
-			if err != nil {
+			var fields map[string]any
+			if err := testCodec(t, cfg).Decode(cfg.CookieName, c.Value, &fields); err != nil {
 				t.Fatal(err)
 			}
-			if claims["sub"] != "welteki" {
-				t.Fatalf("unexpected session subject: %v", claims["sub"])
+			if len(fields) != 0 {
+				t.Fatalf("plain OAuth session must not keep provider tokens or claims: %v", fields)
+			}
+			if strings.Contains(c.Value, issuedJWT) {
+				t.Fatal("session cookie must not carry the access token")
 			}
 		}
 	}
@@ -203,8 +200,10 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 	var issuedJWT string
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		issuedJWT = fakeJWT(map[string]any{
-			"sub": "welteki",
-			"exp": time.Now().Add(time.Hour).Unix(),
+			"sub":   "welteki",
+			"email": "han@example.com",
+			"name":  "Han",
+			"exp":   time.Now().Add(time.Hour).Unix(),
 		})
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"id_token": issuedJWT, "access_token": "opaque", "token_type": "Bearer"})
@@ -233,22 +232,16 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 	}
 	for _, c := range res.Result().Cookies() {
 		if c.Name == "of_session" {
-			var token Token
-			if err := testCodec(t, cfg).Decode(cfg.CookieName, c.Value, &token); err != nil {
-				t.Fatal(err)
-			}
 			if len(strings.Split(c.Value, ".")) != 3 {
 				t.Fatal("browser cookie must use the signed JWT wrapper")
-			}
-			if token.IDToken != issuedJWT {
-				t.Fatalf("session cookie must carry the ID token verbatim")
 			}
 			var fields map[string]string
 			if err := testCodec(t, cfg).Decode(cfg.CookieName, c.Value, &fields); err != nil {
 				t.Fatal(err)
 			}
-			if len(fields) != 2 || fields["id_token"] != issuedJWT || fields["access_token"] != "opaque" {
-				t.Fatal("session cookie must use OAuth JSON field names")
+			want := map[string]string{"sub": "fed:welteki", "email": "han@example.com", "name": "Han"}
+			if !reflect.DeepEqual(fields, want) {
+				t.Fatalf("session cookie must only keep identity claims, got %v", fields)
 			}
 			return
 		}
@@ -368,8 +361,8 @@ func TestCallbackOpaqueOAuthToken(t *testing.T) {
 		if cookie.Name != cfg.CookieName {
 			continue
 		}
-		var token Token
-		if err := testCodec(t, cfg).Decode(cfg.CookieName, cookie.Value, &token); err != nil {
+		var session map[string]any
+		if err := testCodec(t, cfg).Decode(cfg.CookieName, cookie.Value, &session); err != nil {
 			t.Fatal(err)
 		}
 		var claims struct {
@@ -385,8 +378,11 @@ func TestCallbackOpaqueOAuthToken(t *testing.T) {
 		if cookie.Expires.Unix() != claims.Expires {
 			t.Fatal("cookie and wrapper expiry differ")
 		}
-		if token.AccessToken != "gho_opaque-token" || cookie.MaxAge != 0 || time.Until(cookie.Expires) > 120*time.Second || time.Until(cookie.Expires) < 115*time.Second {
-			t.Fatalf("unexpected opaque token or lifetime: %d", cookie.MaxAge)
+		if len(session) != 0 || strings.Contains(cookie.Value, "gho_opaque-token") {
+			t.Fatalf("session cookie must not carry the access token: %v", session)
+		}
+		if cookie.MaxAge != 0 || time.Until(cookie.Expires) > 120*time.Second || time.Until(cookie.Expires) < 115*time.Second {
+			t.Fatalf("unexpected session lifetime: %d", cookie.MaxAge)
 		}
 		return
 	}
@@ -475,7 +471,7 @@ func TestCallbackErrorPage(t *testing.T) {
 		{name: "exchange failure", err: errors.New("sensitive provider details"), status: 502},
 		{name: "invalid ID token", err: ErrInvalidIDToken, status: 401},
 		{name: "expired identity", token: Token{IDToken: fakeJWT(map[string]any{"sub": "user", "exp": time.Now().Add(-time.Hour).Unix()})}, status: 401},
-		{name: "oversized session", token: Token{AccessToken: strings.Repeat("x", maxCookieValueBytes)}, status: 500},
+		{name: "oversized session", token: Token{IDToken: fakeJWT(map[string]any{"sub": "user", "name": strings.Repeat("x", maxCookieValueBytes), "exp": time.Now().Add(time.Hour).Unix()})}, status: 500},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")

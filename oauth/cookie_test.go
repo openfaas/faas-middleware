@@ -13,8 +13,8 @@ import (
 func TestCookieProtection(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 	codec := testCodec(t, cfg)
-	token := Token{IDToken: "id-token", AccessToken: "access-token"}
-	first, err := codec.Encode(cfg.CookieName, token, time.Now().Add(time.Hour))
+	session := Session{Subject: "alice", Email: "alice@example.com"}
+	first, err := codec.Encode(cfg.CookieName, session, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,20 +39,20 @@ func TestCookieProtection(t *testing.T) {
 	if _, ok := fields["encrypted_value"]; ok {
 		t.Fatal("cookie still contains an encrypted payload")
 	}
-	var exposed Token
+	var exposed Session
 	if err := json.Unmarshal(fields["value"], &exposed); err != nil {
 		t.Fatal(err)
 	}
-	if exposed != token {
-		t.Fatal("JWT must contain the readable OAuth token response")
+	if exposed != session {
+		t.Fatal("JWT must contain the readable session claims")
 	}
 	// A separately constructed codec simulates another replica or a restart.
-	var decoded Token
+	var decoded Session
 	if err := testCodec(t, cfg).Decode(cfg.CookieName, first, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded != token {
-		t.Fatal("token response changed")
+	if decoded != session {
+		t.Fatal("session changed")
 	}
 	otherKey := cfg
 	otherKey.CookieSecret = []byte(strings.Repeat("k", 32))

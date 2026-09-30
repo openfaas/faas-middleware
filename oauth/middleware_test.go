@@ -18,8 +18,7 @@ import (
 func TestOAuthMiddlewarePreservesRequest(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 	cfg.CookieName = "custom_session"
-	token := Token{IDToken: "id-token", AccessToken: "access-token"}
-	signed, err := testCodec(t, cfg).Encode(cfg.CookieName, token, time.Now().Add(time.Hour))
+	signed, err := testCodec(t, cfg).Encode(cfg.CookieName, Session{Subject: "alice"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,15 +71,11 @@ func TestOAuthMiddlewarePreservesRequest(t *testing.T) {
 func TestOAuthMiddlewareRejectsInvalidSessions(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 	codec := testCodec(t, cfg)
-	valid, err := codec.Encode(cfg.CookieName, Token{AccessToken: "token"}, time.Now().Add(time.Hour))
+	valid, err := codec.Encode(cfg.CookieName, Session{Subject: "alice"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	wrongName, err := codec.Encode(cfg.LoginCookie, "state", time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	empty, err := codec.Encode(cfg.CookieName, Token{}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +87,6 @@ func TestOAuthMiddlewareRejectsInvalidSessions(t *testing.T) {
 		"plaintext":                 {"of_session=" + plaintext},
 		"tampered":                  {"of_session=" + valid[:len(valid)-2] + "AA"},
 		"empty":                     {"of_session="},
-		"empty token":               {"of_session=" + empty},
 		"expired":                   {"of_session=" + expired},
 		"login cookie substitution": {"of_session=" + wrongName},
 		"duplicate":                 {"of_session=" + valid + "; of_session=" + valid},
@@ -201,7 +195,7 @@ func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
 			cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 			cfg.BaseURL.Path += suffix
 			prefix := strings.TrimRight(cfg.BaseURL.Path, "/")
-			client := &stubClient{token: Token{AccessToken: "new-session"}}
+			client := &stubClient{token: Token{IDToken: fakeJWT(map[string]any{"sub": "new-session", "exp": time.Now().Add(time.Hour).Unix()})}}
 			authHandler, err := NewOAuthHandler(cfg, client)
 			if err != nil {
 				t.Fatal(err)
@@ -219,7 +213,7 @@ func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
 			mux.Handle("/", protected)
 			handler := http.StripPrefix(prefix, mux)
 			jar, _ := cookiejar.New(nil)
-			signed, err := testCodec(t, cfg).Encode(cfg.CookieName, Token{AccessToken: "old-session"}, time.Now().Add(time.Hour))
+			signed, err := testCodec(t, cfg).Encode(cfg.CookieName, Session{Subject: "old-session"}, time.Now().Add(time.Hour))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -271,8 +265,8 @@ func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
 			for _, cookie := range cookies {
 				switch cookie.Name {
 				case cfg.CookieName:
-					var token Token
-					if err := testCodec(t, cfg).Decode(cfg.CookieName, cookie.Value, &token); err != nil || token.AccessToken != "new-session" {
+					var session Session
+					if err := testCodec(t, cfg).Decode(cfg.CookieName, cookie.Value, &session); err != nil || session.Subject != "fed:new-session" {
 						t.Fatal("browser did not retain the new session")
 					}
 				case "theme":
@@ -310,9 +304,9 @@ func TestOIDCSessionThroughHTTPProxy(t *testing.T) {
 			w.WriteHeader(500)
 			return
 		}
-		var token Token
-		err = testCodec(t, f.cfg).Decode(f.cfg.CookieName, cookie.Value, &token)
-		if err != nil || token.IDToken != raw || token.AccessToken != "opaque" || cookie.Value != session {
+		var identity Session
+		err = testCodec(t, f.cfg).Decode(f.cfg.CookieName, cookie.Value, &identity)
+		if err != nil || identity != (Session{Subject: "fed:alice", FederatedIssuer: f.cfg.IssuerURL}) || cookie.Value != session || strings.Contains(cookie.Value, "opaque") {
 			t.Error("proxy did not forward the original signed session JWT")
 		}
 		w.WriteHeader(http.StatusNoContent)
