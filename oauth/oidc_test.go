@@ -229,10 +229,7 @@ func TestOIDCCallbackOnlyIssuesCookieAfterVerification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f.token.Store(map[string]string{"id_token": tc.idToken, "access_token": tc.accessToken})
 			req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=code&state=state", nil)
-			stateCookie, err := testCodec(t, f.cfg).Encode(f.cfg.LoginCookie, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(defaultStateLifetime))
-			if err != nil {
-				t.Fatal(err)
-			}
+			stateCookie := testLoginToken(t, f.cfg, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(defaultStateLifetime))
 			req.AddCookie(&http.Cookie{Name: f.cfg.LoginCookie, Value: stateCookie})
 			res := httptest.NewRecorder()
 			handler.ServeHTTP(res, req)
