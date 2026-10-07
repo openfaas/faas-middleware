@@ -18,10 +18,7 @@ import (
 func TestOAuthMiddlewarePreservesRequest(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 	cfg.CookieName = "custom_session"
-	signed, err := testCodec(t, cfg).Encode(cfg.CookieName, Session{Subject: "alice"}, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
+	signed := testSessionToken(t, cfg, testSession("alice"), time.Now().Add(time.Hour))
 	req := httptest.NewRequest(http.MethodPost, "/private?query=value", strings.NewReader("body"))
 	req.Header.Add("Cookie", "theme=dark; custom_session="+signed)
 	req.Header.Add("Cookie", "other=value; quoted=\"hello world\"")
@@ -71,24 +68,18 @@ func TestOAuthMiddlewarePreservesRequest(t *testing.T) {
 func TestOAuthMiddlewareRejectsInvalidSessions(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 	codec := testCodec(t, cfg)
-	valid, err := codec.Encode(cfg.CookieName, Session{Subject: "alice"}, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrongName, err := codec.Encode(cfg.LoginCookie, "state", time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	expiredClaims := validCookieClaims(t, codec, cfg.CookieName)
+	valid := testSessionToken(t, cfg, testSession("alice"), time.Now().Add(time.Hour))
+	loginToken := testLoginToken(t, cfg, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Hour))
+	expiredClaims := testSessionClaims(t, codec, testSession("alice"), time.Now().Add(time.Hour))
 	expiredClaims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Second))
-	expired := signCookieClaims(t, codec, expiredClaims, jwt.SigningMethodHS256, codec.signingKey)
+	expired := signCookieClaims(t, &expiredClaims, jwt.SigningMethodHS256, codec.signingKey)
 	plaintext := "eyJhY2Nlc3NfdG9rZW4iOiJ1bnRydXN0ZWQifQ"
 	for name, headers := range map[string][]string{
 		"plaintext":                 {"of_session=" + plaintext},
 		"tampered":                  {"of_session=" + valid[:len(valid)-2] + "AA"},
 		"empty":                     {"of_session="},
 		"expired":                   {"of_session=" + expired},
-		"login cookie substitution": {"of_session=" + wrongName},
+		"login cookie substitution": {"of_session=" + loginToken},
 		"duplicate":                 {"of_session=" + valid + "; of_session=" + valid},
 		"duplicate headers":         {"of_session=" + valid, "of_session=" + valid},
 		"malformed":                 {"of_session=\"unterminated"},
@@ -213,10 +204,7 @@ func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
 			mux.Handle("/", protected)
 			handler := http.StripPrefix(prefix, mux)
 			jar, _ := cookiejar.New(nil)
-			signed, err := testCodec(t, cfg).Encode(cfg.CookieName, Session{Subject: "old-session"}, time.Now().Add(time.Hour))
-			if err != nil {
-				t.Fatal(err)
-			}
+			signed := testSessionToken(t, cfg, testSession("old-session"), time.Now().Add(time.Hour))
 			jar.SetCookies(cfg.BaseURL, []*http.Cookie{
 				{Name: cfg.CookieName, Value: "legacy-session", Path: "/", Secure: true},
 				{Name: cfg.CookieName, Value: signed, Path: prefix, Secure: true},
@@ -246,7 +234,7 @@ func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
 				t.Fatalf("login returned %d", login.Code)
 			}
 			var state loginSession
-			if err := testCodec(t, cfg).Decode(cfg.LoginCookie, login.Result().Cookies()[0].Value, &state); err != nil {
+			if err := testCodec(t, cfg).decode(login.Result().Cookies()[0].Value, &state, loginTokenType); err != nil {
 				t.Fatal(err)
 			}
 			callbackURL := cfg.BaseURL.JoinPath("auth/callback")
@@ -265,8 +253,8 @@ func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
 			for _, cookie := range cookies {
 				switch cookie.Name {
 				case cfg.CookieName:
-					var session Session
-					if err := testCodec(t, cfg).Decode(cfg.CookieName, cookie.Value, &session); err != nil || session.Subject != "fed:new-session" {
+					var session sessionClaims
+					if err := testCodec(t, cfg).decode(cookie.Value, &session, sessionTokenType); err != nil || session.Subject != "fed:new-session" {
 						t.Fatal("browser did not retain the new session")
 					}
 				case "theme":
@@ -304,9 +292,9 @@ func TestOIDCSessionThroughHTTPProxy(t *testing.T) {
 			w.WriteHeader(500)
 			return
 		}
-		var identity Session
-		err = testCodec(t, f.cfg).Decode(f.cfg.CookieName, cookie.Value, &identity)
-		if err != nil || identity != (Session{Subject: "fed:alice", FederatedIssuer: f.cfg.IssuerURL}) || cookie.Value != session || strings.Contains(cookie.Value, "opaque") {
+		var identity sessionClaims
+		err = testCodec(t, f.cfg).decode(cookie.Value, &identity, sessionTokenType)
+		if err != nil || identity.Subject != "fed:alice" || identity.FederatedIssuer != f.cfg.IssuerURL || cookie.Value != session || strings.Contains(cookie.Value, "opaque") {
 			t.Error("proxy did not forward the original signed session JWT")
 		}
 		w.WriteHeader(http.StatusNoContent)

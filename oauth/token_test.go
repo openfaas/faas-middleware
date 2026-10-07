@@ -1,9 +1,29 @@
 package oauth
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestNewSessionCopiesFederatedClaims(t *testing.T) {
+	identity, err := newSession(Token{IDToken: fakeJWT(map[string]any{
+		"iss":            "https://issuer.example",
+		"sub":            "alice",
+		"email":          "alice@example.com",
+		"email_verified": false,
+		"name":           "Alice",
+		"groups":         []any{"developers", 42, "operators"},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Type != sessionTokenType || identity.Subject != "fed:alice" || identity.FederatedIssuer != "https://issuer.example" ||
+		identity.FederatedEmail != "alice@example.com" || identity.EmailVerified == nil || *identity.EmailVerified ||
+		identity.FederatedName != "Alice" || !reflect.DeepEqual(identity.FederatedGroups, []string{"developers", "operators"}) || !identity.GroupsTruncated {
+		t.Fatalf("unexpected federated identity: %+v", identity)
+	}
+}
 
 func TestSessionExpiry(t *testing.T) {
 	now := time.Unix(1800000000, 0)

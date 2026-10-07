@@ -24,6 +24,7 @@ func setOAuthEnv(t *testing.T, values map[string]string) {
 		"oauth_token_endpoint",
 		"oauth_token_auth_method",
 		"oauth_scopes",
+		"oauth_groups",
 		"oauth_cookie_name",
 		"oauth_signing_key",
 		"oauth_login_cookie_name",
@@ -58,6 +59,9 @@ func TestReadConfigDefaults(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Scopes, []string{"openid"}) {
 		t.Fatalf("unexpected default scopes: %v", cfg.Scopes)
 	}
+	if cfg.GroupAllowlist != nil {
+		t.Fatalf("groups must be imported by default: %v", cfg.GroupAllowlist)
+	}
 	if cfg.CookieName != "of_session" || cfg.LoginCookie != "of_login" {
 		t.Fatalf("unexpected default cookie names: %s / %s", cfg.CookieName, cfg.LoginCookie)
 	}
@@ -74,6 +78,7 @@ func TestReadConfigOverrides(t *testing.T) {
 		"oauth_authorization_endpoint": "https://issuer.example.com/authorize",
 		"oauth_token_endpoint":         "https://issuer.example.com/token",
 		"oauth_scopes":                 "openid profile email",
+		"oauth_groups":                 " admins, staff, admins, , operators ",
 		"oauth_cookie_name":            "app_session",
 		"oauth_login_cookie_name":      "app_login",
 		"oauth_login_redirect":         "https://gateway.example.com/function/my-fn/dashboard",
@@ -84,6 +89,9 @@ func TestReadConfigOverrides(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.Scopes, []string{"openid", "profile", "email"}) {
 		t.Fatalf("unexpected scopes: %v", cfg.Scopes)
+	}
+	if !reflect.DeepEqual(cfg.GroupAllowlist, []string{"admins", "staff", "operators"}) {
+		t.Fatalf("unexpected group allowlist: %v", cfg.GroupAllowlist)
 	}
 	if cfg.CookieName != "app_session" || cfg.LoginCookie != "app_login" {
 		t.Fatalf("unexpected cookie names: %s / %s", cfg.CookieName, cfg.LoginCookie)

@@ -84,7 +84,7 @@ func TestLoginRedirectsToAuthorizationEndpointWithStateCookie(t *testing.T) {
 	}
 	var state loginSession
 	cfg := testConfig("https://issuer.example.com/authorize", "https://issuer.example.com/token")
-	if err := testCodec(t, cfg).Decode(cfg.LoginCookie, cookie.Value, &state); err != nil {
+	if err := testCodec(t, cfg).decode(cookie.Value, &state, loginTokenType); err != nil {
 		t.Fatal(err)
 	}
 	if state.State == "" || state.State != loginState(t, res) || cookie.Value == state.State {
@@ -177,14 +177,14 @@ func TestCallbackIssuesSessionCookie(t *testing.T) {
 				t.Fatal("session cookie must be HttpOnly")
 			}
 			if len(strings.Split(c.Value, ".")) != 3 {
-				t.Fatal("browser cookie must use the signed JWT wrapper")
+				t.Fatal("browser cookie must contain a signed JWT")
 			}
-			var fields map[string]any
-			if err := testCodec(t, cfg).Decode(cfg.CookieName, c.Value, &fields); err != nil {
+			var session sessionClaims
+			if err := testCodec(t, cfg).decode(c.Value, &session, sessionTokenType); err != nil {
 				t.Fatal(err)
 			}
-			if len(fields) != 0 {
-				t.Fatalf("plain OAuth session must not keep provider tokens or claims: %v", fields)
+			if session.Subject != "" || session.FederatedIssuer != "" || session.FederatedEmail != "" || session.FederatedName != "" || len(session.FederatedGroups) != 0 {
+				t.Fatalf("plain OAuth session must not keep provider tokens or identity claims: %+v", session)
 			}
 			if strings.Contains(c.Value, issuedJWT) {
 				t.Fatal("session cookie must not carry the access token")
@@ -200,10 +200,13 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 	var issuedJWT string
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		issuedJWT = fakeJWT(map[string]any{
-			"sub":   "welteki",
-			"email": "han@example.com",
-			"name":  "Han",
-			"exp":   time.Now().Add(time.Hour).Unix(),
+			"iss":            "https://issuer.example.com",
+			"sub":            "welteki",
+			"email":          "han@example.com",
+			"email_verified": true,
+			"name":           "Han",
+			"groups":         []string{"developers", "operators"},
+			"exp":            time.Now().Add(time.Hour).Unix(),
 		})
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"id_token": issuedJWT, "access_token": "opaque", "token_type": "Bearer"})
@@ -213,6 +216,7 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 	cfg := testConfig("https://issuer.example.com/authorize", tokenEndpoint.URL)
 	cfg.AllowHTTP = true
 	cfg.LoginRedirect = "https://example.com/function/my-fn/dashboard"
+	cfg.GroupAllowlist = []string{"operators"}
 	handler := testHandler(t, cfg)
 
 	login := httptest.NewRecorder()
@@ -233,15 +237,16 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 	for _, c := range res.Result().Cookies() {
 		if c.Name == "of_session" {
 			if len(strings.Split(c.Value, ".")) != 3 {
-				t.Fatal("browser cookie must use the signed JWT wrapper")
+				t.Fatal("browser cookie must contain a signed JWT")
 			}
-			var fields map[string]string
-			if err := testCodec(t, cfg).Decode(cfg.CookieName, c.Value, &fields); err != nil {
+			var session sessionClaims
+			if err := testCodec(t, cfg).decode(c.Value, &session, sessionTokenType); err != nil {
 				t.Fatal(err)
 			}
-			want := map[string]string{"sub": "fed:welteki", "email": "han@example.com", "name": "Han"}
-			if !reflect.DeepEqual(fields, want) {
-				t.Fatalf("session cookie must only keep identity claims, got %v", fields)
+			if session.Subject != "fed:welteki" || session.FederatedIssuer != "https://issuer.example.com" ||
+				session.FederatedEmail != "han@example.com" || session.EmailVerified == nil || !*session.EmailVerified ||
+				session.FederatedName != "Han" || !reflect.DeepEqual(session.FederatedGroups, []string{"operators"}) {
+				t.Fatalf("session cookie has incorrect federated identity claims: %+v", session)
 			}
 			return
 		}
@@ -277,15 +282,6 @@ func TestLogoutClearsCookies(t *testing.T) {
 	}
 }
 
-func testCodec(t *testing.T, cfg Config) *CookieCodec {
-	t.Helper()
-	codec, err := NewCookieCodec(cfg.CookieSecret, cfg.BaseURL.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return codec
-}
-
 func loginState(t *testing.T, res *httptest.ResponseRecorder) string {
 	t.Helper()
 	u, err := url.Parse(res.Header().Get("Location"))
@@ -303,10 +299,7 @@ func TestCallbackRejectsExpiredIdentity(t *testing.T) {
 	cfg := testConfig("https://issuer.example.com/authorize", endpoint.URL)
 	cfg.AllowHTTP = true
 	handler := testHandler(t, cfg)
-	state, err := testCodec(t, cfg).Encode(cfg.LoginCookie, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
+	state := testLoginToken(t, cfg, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=code&state=state", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.LoginCookie, Value: state})
 	res := httptest.NewRecorder()
@@ -331,6 +324,23 @@ func TestCallbackRejectsForgedStateCookie(t *testing.T) {
 	handler.ServeHTTP(res, req)
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("forged state returned %d", res.Code)
+	}
+}
+
+func TestCallbackRejectsDuplicateLoginCookies(t *testing.T) {
+	cfg := testConfig("https://issuer.example.com/authorize", "https://issuer.example.com/token")
+	client := &stubClient{}
+	handler, err := NewOAuthHandler(cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := testLoginToken(t, cfg, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=code&state=state", nil)
+	req.Header.Set("Cookie", cfg.LoginCookie+"="+value+"; "+cfg.LoginCookie+"="+value)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest || client.called {
+		t.Fatal("duplicate login cookies must fail before token exchange")
 	}
 }
 
@@ -361,8 +371,8 @@ func TestCallbackOpaqueOAuthToken(t *testing.T) {
 		if cookie.Name != cfg.CookieName {
 			continue
 		}
-		var session map[string]any
-		if err := testCodec(t, cfg).Decode(cfg.CookieName, cookie.Value, &session); err != nil {
+		var session sessionClaims
+		if err := testCodec(t, cfg).decode(cookie.Value, &session, sessionTokenType); err != nil {
 			t.Fatal(err)
 		}
 		var claims struct {
@@ -376,10 +386,10 @@ func TestCallbackOpaqueOAuthToken(t *testing.T) {
 			t.Fatal(err)
 		}
 		if cookie.Expires.Unix() != claims.Expires {
-			t.Fatal("cookie and wrapper expiry differ")
+			t.Fatal("cookie and JWT expiry differ")
 		}
-		if len(session) != 0 || strings.Contains(cookie.Value, "gho_opaque-token") {
-			t.Fatalf("session cookie must not carry the access token: %v", session)
+		if session.Subject != "" || session.FederatedIssuer != "" || strings.Contains(cookie.Value, "gho_opaque-token") {
+			t.Fatalf("session cookie must not carry the access token: %+v", session)
 		}
 		if cookie.MaxAge != 0 || time.Until(cookie.Expires) > 120*time.Second || time.Until(cookie.Expires) < 115*time.Second {
 			t.Fatalf("unexpected session lifetime: %d", cookie.MaxAge)
@@ -480,10 +490,7 @@ func TestCallbackErrorPage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			state, err := testCodec(t, cfg).Encode(cfg.LoginCookie, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
-			if err != nil {
-				t.Fatal(err)
-			}
+			state := testLoginToken(t, cfg, loginSession{State: "state", Verifier: "verifier"}, time.Now().Add(time.Minute))
 			query := tc.query
 			if query == "" {
 				query = "code=code&state=state"
@@ -524,7 +531,7 @@ func TestCallbackErrorPage(t *testing.T) {
 
 func TestLoginCreationErrorPage(t *testing.T) {
 	cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
-	cfg.LoginCookie = strings.Repeat("x", maxCookieValueBytes)
+	cfg.BaseURL.Path = "/" + strings.Repeat("x", maxCookieValueBytes)
 	h, err := NewOAuthHandler(cfg, &stubClient{})
 	if err != nil {
 		t.Fatal(err)
@@ -666,10 +673,7 @@ func TestCallbackRejectsMissingPKCEVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	value, err := testCodec(t, cfg).Encode(cfg.LoginCookie, loginSession{State: "state"}, time.Now().Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
+	value := testLoginToken(t, cfg, loginSession{State: "state"}, time.Now().Add(time.Minute))
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=code&state=state", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.LoginCookie, Value: value})
 	res := httptest.NewRecorder()
