@@ -186,7 +186,7 @@ func TestOAuthMiddlewareRecoversFromDuplicateSessionCookies(t *testing.T) {
 			cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
 			cfg.BaseURL.Path += suffix
 			prefix := strings.TrimRight(cfg.BaseURL.Path, "/")
-			client := &stubClient{token: Token{IDToken: fakeJWT(map[string]any{"sub": "new-session", "exp": time.Now().Add(time.Hour).Unix()})}}
+			client := &stubClient{token: Token{verifiedClaims: jwt.MapClaims{"sub": "new-session", "exp": float64(time.Now().Add(time.Hour).Unix())}}}
 			authHandler, err := NewOAuthHandler(cfg, client)
 			if err != nil {
 				t.Fatal(err)
