@@ -10,7 +10,6 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -196,7 +195,7 @@ func TestCallbackIssuesSessionCookie(t *testing.T) {
 	}
 }
 
-func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
+func TestPlainOAuthCallbackIgnoresUnverifiedIDToken(t *testing.T) {
 	var issuedJWT string
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		issuedJWT = fakeJWT(map[string]any{
@@ -243,10 +242,10 @@ func TestCallbackIssuesSessionCookieWithIDToken(t *testing.T) {
 			if err := testCodec(t, cfg).decode(c.Value, &session, sessionTokenType); err != nil {
 				t.Fatal(err)
 			}
-			if session.Subject != "fed:welteki" || session.FederatedIssuer != "https://issuer.example.com" ||
-				session.FederatedEmail != "han@example.com" || session.EmailVerified == nil || !*session.EmailVerified ||
-				session.FederatedName != "Han" || !reflect.DeepEqual(session.FederatedGroups, []string{"operators"}) {
-				t.Fatalf("session cookie has incorrect federated identity claims: %+v", session)
+			if session.Subject != "" || session.FederatedIssuer != "" || session.FederatedEmail != "" ||
+				session.EmailVerified != nil || session.FederatedName != "" || len(session.FederatedGroups) != 0 ||
+				session.GroupsTruncated {
+				t.Fatalf("plain OAuth session retained unverified identity claims: %+v", session)
 			}
 			return
 		}
@@ -291,7 +290,7 @@ func loginState(t *testing.T, res *httptest.ResponseRecorder) string {
 	return u.Query().Get("state")
 }
 
-func TestCallbackRejectsExpiredIdentity(t *testing.T) {
+func TestPlainOAuthCallbackIgnoresExpiredUnverifiedIDToken(t *testing.T) {
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"id_token": fakeJWT(map[string]any{"sub": "alice", "exp": time.Now().Add(-time.Minute).Unix()})})
 	}))
@@ -304,14 +303,23 @@ func TestCallbackRejectsExpiredIdentity(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: cfg.LoginCookie, Value: state})
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusUnauthorized {
-		t.Fatalf("expired identity returned %d", res.Code)
+	if res.Code != http.StatusSeeOther {
+		t.Fatalf("plain OAuth callback returned %d, want 303", res.Code)
 	}
 	for _, cookie := range res.Result().Cookies() {
 		if cookie.Name == cfg.CookieName {
-			t.Fatal("issued a session for an expired identity")
+			var session sessionClaims
+			if err := testCodec(t, cfg).decode(cookie.Value, &session, sessionTokenType); err != nil {
+				t.Fatal(err)
+			}
+			if session.Subject != "" || session.FederatedIssuer != "" || session.FederatedEmail != "" ||
+				session.EmailVerified != nil || session.FederatedName != "" || len(session.FederatedGroups) != 0 {
+				t.Fatalf("plain OAuth session retained unverified identity claims: %+v", session)
+			}
+			return
 		}
 	}
+	t.Fatal("no session cookie issued")
 }
 
 func TestCallbackRejectsForgedStateCookie(t *testing.T) {
@@ -480,8 +488,8 @@ func TestCallbackErrorPage(t *testing.T) {
 		{name: "provider denial", query: "error=access_denied&code=code&state=state", status: 400, skipExchange: true},
 		{name: "exchange failure", err: errors.New("sensitive provider details"), status: 502},
 		{name: "invalid ID token", err: ErrInvalidIDToken, status: 401},
-		{name: "expired identity", token: Token{IDToken: fakeJWT(map[string]any{"sub": "user", "exp": time.Now().Add(-time.Hour).Unix()})}, status: 401},
-		{name: "oversized session", token: Token{IDToken: fakeJWT(map[string]any{"sub": "user", "name": strings.Repeat("x", maxCookieValueBytes), "exp": time.Now().Add(time.Hour).Unix()})}, status: 500},
+		{name: "expired identity", token: Token{verifiedClaims: jwt.MapClaims{"sub": "user", "exp": float64(time.Now().Add(-time.Hour).Unix())}}, status: 401},
+		{name: "oversized session", token: Token{verifiedClaims: jwt.MapClaims{"sub": "user", "name": strings.Repeat("x", maxCookieValueBytes), "exp": float64(time.Now().Add(time.Hour).Unix())}}, status: 500},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig("https://issuer.example/authorize", "https://issuer.example/token")
