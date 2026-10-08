@@ -4,17 +4,19 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestNewSessionCopiesFederatedClaims(t *testing.T) {
-	identity, err := newSession(Token{IDToken: fakeJWT(map[string]any{
+	identity, err := newSession(Token{verifiedClaims: jwt.MapClaims{
 		"iss":            "https://issuer.example",
 		"sub":            "alice",
 		"email":          "alice@example.com",
 		"email_verified": false,
 		"name":           "Alice",
 		"groups":         []any{"developers", 42, "operators"},
-	})})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,27 +27,44 @@ func TestNewSessionCopiesFederatedClaims(t *testing.T) {
 	}
 }
 
+func TestNewSessionIgnoresUnverifiedIDToken(t *testing.T) {
+	identity, err := newSession(Token{IDToken: fakeJWT(map[string]any{
+		"iss":  "https://issuer.example",
+		"sub":  "mallory",
+		"name": "Mallory",
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Type != sessionTokenType || identity.Subject != "" || identity.FederatedIssuer != "" ||
+		identity.FederatedName != "" {
+		t.Fatalf("unverified ID token became session identity: %+v", identity)
+	}
+}
+
 func TestSessionExpiry(t *testing.T) {
 	now := time.Unix(1800000000, 0)
 	id := fakeJWT(map[string]any{"sub": "alice", "exp": now.Add(2 * time.Hour).Unix()})
+	identity := jwt.MapClaims{"sub": "alice", "exp": float64(now.Add(2 * time.Hour).Unix())}
 	for _, tc := range []struct {
 		name                     string
 		token                    Token
 		fallback, override, want time.Duration
 		invalid                  bool
 	}{
-		{name: "OIDC", token: Token{IDToken: id, ExpiresIn: 60}, want: 2 * time.Hour},
+		{name: "OIDC", token: Token{IDToken: id, ExpiresIn: 60, verifiedClaims: identity}, want: 2 * time.Hour},
 		{name: "opaque OAuth", token: Token{AccessToken: "opaque", ExpiresIn: 120}, want: 2 * time.Minute},
+		{name: "unverified ID uses response lifetime", token: Token{IDToken: id, ExpiresIn: 120}, want: 2 * time.Minute},
 		{name: "long OAuth lifetime", token: Token{AccessToken: "opaque", ExpiresIn: 7200}, want: 2 * time.Hour},
 		{name: "OAuth JWT uses response lifetime", token: Token{AccessToken: id, ExpiresIn: 120}, want: 2 * time.Minute},
 		{name: "default", token: Token{AccessToken: "opaque"}, want: time.Hour},
 		{name: "configured default", token: Token{AccessToken: "opaque"}, fallback: 15 * time.Minute, want: 15 * time.Minute},
-		{name: "OIDC longer override", token: Token{IDToken: id}, override: 8 * time.Hour, want: 8 * time.Hour},
-		{name: "OIDC shorter override", token: Token{IDToken: id}, override: time.Minute, want: time.Minute},
+		{name: "OIDC longer override", token: Token{IDToken: id, verifiedClaims: identity}, override: 8 * time.Hour, want: 8 * time.Hour},
+		{name: "OIDC shorter override", token: Token{IDToken: id, verifiedClaims: identity}, override: time.Minute, want: time.Minute},
 		{name: "OAuth override", token: Token{AccessToken: "opaque", ExpiresIn: 60}, override: 8 * time.Hour, want: 8 * time.Hour},
 		{name: "override default", token: Token{AccessToken: "opaque"}, override: 8 * time.Hour, want: 8 * time.Hour},
-		{name: "expired ID despite override", token: Token{IDToken: fakeJWT(map[string]any{"sub": "alice", "exp": now.Add(-time.Hour).Unix()})}, override: time.Hour, invalid: true},
-		{name: "missing ID expiry", token: Token{IDToken: fakeJWT(map[string]any{"sub": "alice"})}, invalid: true},
+		{name: "expired ID despite override", token: Token{verifiedClaims: jwt.MapClaims{"sub": "alice", "exp": float64(now.Add(-time.Hour).Unix())}}, override: time.Hour, invalid: true},
+		{name: "missing ID expiry", token: Token{verifiedClaims: jwt.MapClaims{"sub": "alice"}}, invalid: true},
 		{name: "negative lifetime", token: Token{AccessToken: "opaque", ExpiresIn: -1}, invalid: true},
 		{name: "overflow", token: Token{AccessToken: "opaque", ExpiresIn: 1<<63 - 1}, invalid: true},
 	} {

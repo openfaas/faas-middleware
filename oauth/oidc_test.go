@@ -240,6 +240,15 @@ func TestOIDCCallbackOnlyIssuesCookieAfterVerification(t *testing.T) {
 			for _, cookie := range res.Result().Cookies() {
 				if cookie.Name == f.cfg.CookieName {
 					session = true
+					if tc.status == http.StatusSeeOther {
+						var claims sessionClaims
+						if err := testCodec(t, f.cfg).decode(cookie.Value, &claims, sessionTokenType); err != nil {
+							t.Fatal(err)
+						}
+						if claims.Subject != "fed:alice" || claims.FederatedIssuer != f.cfg.IssuerURL {
+							t.Fatalf("session missing verified OIDC identity: %+v", claims)
+						}
+					}
 				}
 			}
 			if session != (tc.status == http.StatusSeeOther) {
